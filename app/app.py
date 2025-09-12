@@ -1,65 +1,100 @@
 import os
-import numpy as np
-import pandas as pd
 import joblib
-import streamlit as st
+import pandas as pd
+from dash import Dash, html, dcc, Input, Output, State
 
-# ========= SETTINGS =========
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.pkl")
-# EXACT training order:
-FEATURE_ORDER = ['year', 'fuel', 'seller_type', 'transmission', 'engine', 'max_power']
-LOG_TRAINED = True  # trained on log
+# ---- Load saved pipeline (preprocess + RandomForest inside TransformedTargetRegressor) ----
+PIPELINE_PATH = os.path.join(os.path.dirname(__file__), "models", "model_pipeline.pkl")
+if not os.path.exists(PIPELINE_PATH):
+    raise FileNotFoundError(
+        "model_pipeline.pkl not found. Run the notebook cell that saves to app/models/model_pipeline.pkl"
+    )
+pipe = joblib.load(PIPELINE_PATH)
 
-@st.cache_resource
-def load_model(path: str):
-    return joblib.load(path)
+# ---- Your exact raw input schema/order ----
+NUM_COLS = ["year", "engine", "max_power"]
+CAT_COLS = ["fuel", "seller_type", "transmission"]
+RAW_COLUMNS = NUM_COLS + CAT_COLS  # order matters
 
-st.set_page_config(page_title="Car Price Predictor", page_icon="🚗", layout="centered")
-st.title("🚗 Car Price Predictor")
-st.caption("Enter car details to estimate its price. All fields are required.")
+FUEL_OPTS = ["Petrol", "Diesel"]
+SELLER_OPTS = ["Individual", "Dealer", "Trustmark Dealer"]
+TRANS_OPTS = ["Manual", "Automatic"]
 
-with st.form("predict_form"):
-    c1, c2 = st.columns(2)
-    year        = c1.number_input("Year", min_value=1985, max_value=2030, step=1, value=2017)
-    engine_cc   = c2.number_input("Engine (CC)", min_value=10, max_value=10000, step=1, value=1248)
+app = Dash(__name__)
+server = app.server  # for gunicorn
 
-    c3, c4 = st.columns(2)
-    max_power   = c3.number_input("Max Power (bhp)", min_value=1, max_value=2000, step=1, value=75)
-    transmission= c4.selectbox("Transmission", ["Manual", "Automatic"])
+def num_input(name, placeholder):
+    return html.Div([
+        html.Label(name, style={"fontWeight": 600}),
+        dcc.Input(id=f"in-{name}", type="number", placeholder=placeholder, style={"width": "100%"})
+    ])
 
-    c5, c6 = st.columns(2)
-    seller_type = c5.selectbox("Seller Type", ["Individual","Dealer","Trustmark Dealer"])
-    fuel        = c6.selectbox("Fuel", ["Petrol","Diesel"])
+def cat_dropdown(name, options):
+    return html.Div([
+        html.Label(name, style={"fontWeight": 600}),
+        dcc.Dropdown(
+            id=f"in-{name}",
+            options=[{"label": v, "value": v} for v in options],
+            placeholder=f"Select {name}"
+        )
+    ])
 
-    submitted = st.form_submit_button("Predict", use_container_width=True)
+app.layout = html.Div(
+    style={"maxWidth": "820px", "margin": "2rem auto", "fontFamily": "system-ui, sans-serif"},
+    children=[
+        html.H2("Car Price Predictor"),
+        html.P("All input fields are required."),
 
-if submitted:
-    # categorical mappings 
-    fuel_map   = {"Petrol": 1, "Diesel": 2}
-    trans_map  = {"Manual": 1, "Automatic": 2}
-    seller_map = {"Individual": 1, "Dealer": 2, "Trustmark Dealer": 3}
+        html.Div(style={"display": "grid", "gap": ".75rem"}, children=[
+            num_input("year", "e.g., 2017"),
+            num_input("engine", "cc (numeric)"),
+            num_input("max_power", "bhp (numeric)"),
+            cat_dropdown("fuel", FUEL_OPTS),
+            cat_dropdown("seller_type", SELLER_OPTS),
+            cat_dropdown("transmission", TRANS_OPTS),
+        ]),
+
+        html.Button("Predict", id="btn", style={"marginTop": "1rem", "padding": ".6rem 1rem"}),
+        html.Div(id="pred", style={"marginTop": "1rem", "fontSize": "1.25rem", "fontWeight": 700}),
+        html.Hr(),
+        html.Div("ok", id="health")
+    ]
+)
+
+@app.callback(
+    Output("pred", "children"),
+    Input("btn", "n_clicks"),
+    State("in-year", "value"),
+    State("in-engine", "value"),
+    State("in-max_power", "value"),
+    State("in-fuel", "value"),
+    State("in-seller_type", "value"),
+    State("in-transmission", "value"),
+    prevent_initial_call=True
+)
+def predict(n, year, engine, max_power, fuel, seller_type, transmission):
+    fields = {"year": year, "engine": engine, "max_power": max_power,
+              "fuel": fuel, "seller_type": seller_type, "transmission": transmission}
+    missing = [k for k, v in fields.items() if v in (None, "")]
+    if missing:
+        return f"Please fill: {', '.join(missing)}"
 
     row = {
-        'year': int(year),
-        'fuel': fuel_map[fuel],
-        'seller_type': seller_map[seller_type],
-        'transmission': trans_map[transmission],
-        'engine': float(engine_cc),
-        'max_power': float(max_power),
+        "year": float(year),
+        "engine": float(engine),
+        "max_power": float(max_power),
+        "fuel": fuel,
+        "seller_type": seller_type,
+        "transmission": transmission,
     }
-    X = pd.DataFrame([[row[c] for c in FEATURE_ORDER]], columns=FEATURE_ORDER)
+    X = pd.DataFrame([row], columns=RAW_COLUMNS)
 
-    # Load & predict
     try:
-        model = load_model(MODEL_PATH)
+        y = float(pipe.predict(X)[0])
+        return f"Predicted price: {y:,.2f}"
     except Exception as e:
-        st.error(f"Could not load model: {type(e).__name__}: {e}")
-    else:
-        try:
-            yhat = float(model.predict(X)[0])
-            price = float(np.exp(yhat)) if LOG_TRAINED else yhat
-            st.success(f"Estimated Price: {price:,.0f}")
-        except Exception as e:
-            st.error(f"Prediction failed — {type(e).__name__}: {e}")
-            with st.expander("Debug input"):
-                st.write(X)
+        return f"Prediction error: {e}"
+
+if __name__ == "__main__":
+    # keep 0.0.0.0 for Docker; open http://localhost:8000 in your browser
+    app.run(host="0.0.0.0", port=8000, debug=True)
