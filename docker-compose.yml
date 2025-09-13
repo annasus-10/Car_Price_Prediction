@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: carprice:a1-dash           # local tag name
+    container_name: carprice-a1-dash
+    working_dir: /app
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000                     # matches gunicorn/EXPOSE
+    ports:
+      - "8050:8000"                   # open http://localhost:8050
+    restart: unless-stopped
